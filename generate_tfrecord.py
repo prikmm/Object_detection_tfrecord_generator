@@ -18,16 +18,21 @@ optional arguments:
 
 import os
 import glob
+import numpy as np
 import pandas as pd
 import io
 import xml.etree.ElementTree as ET
 import argparse
 
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'    # Suppress TensorFlow logging (1)
-import tensorflow.compat.v1 as tf
+import tensorflow.compat.v1 as tf_compat
+import tensorflow as tf
+
 from PIL import Image
 from object_detection.utils import dataset_util, label_map_util
 from collections import namedtuple
+import albumentations as A
+import matplotlib.pyplot as plt
 
 # Initiate argument parser
 parser = argparse.ArgumentParser(
@@ -56,6 +61,11 @@ parser.add_argument("-e",
                     "--img_extension",
                     help="Extension of the images. jpg or jpeg",
                     type=str, default="jpeg")
+parser.add_argument("-a",
+                    "--augment",
+                    help="Whether to augment the dataset or not",
+                    type=bool, default=True)
+
 
 args = parser.parse_args()
 
@@ -118,22 +128,26 @@ def split(df, group):
     return [data(filename, gb.get_group(x)) for filename, x in zip(gb.groups.keys(), gb.groups)]
 
 
-def create_tf_example(group, path):
-    with tf.gfile.GFile(os.path.join(path, '{}'.format(group.filename)), 'rb') as fid:
+def read_img(group, path):
+    with tf.io.gfile.GFile(os.path.join(path, '{}'.format(group.filename)), 'rb') as fid:
         encoded_jpg = fid.read()
     encoded_jpg_io = io.BytesIO(encoded_jpg)
     image = Image.open(encoded_jpg_io)
     width, height = image.size
+    return encoded_jpg, encoded_jpg_io, image, width, height
 
-    filename = group.filename.encode('utf8')
-    image_format = b'jpg'
+
+def calculate_bbox():
+    pass
+
+
+def structure_example(width, height, group, path):
     xmins = []
     xmaxs = []
     ymins = []
     ymaxs = []
     classes_text = []
     classes = []
-
     for index, row in group.object.iterrows():
         xmins.append(row['xmin'] / width)
         xmaxs.append(row['xmax'] / width)
@@ -141,6 +155,12 @@ def create_tf_example(group, path):
         ymaxs.append(row['ymax'] / height)
         classes_text.append(row['class'].encode('utf8'))
         classes.append(class_text_to_int(row['class']))
+    return xmins, xmaxs, ymins, ymaxs, classes_text, classes
+
+
+def create_tf_example(encoded_jpg, image, width, height, xmins, xmaxs,
+                      ymins, ymaxs, classes_text, classes, filename,
+                      image_format):
 
     tf_example = tf.train.Example(features=tf.train.Features(feature={
         'image/height': dataset_util.int64_feature(height),
@@ -159,15 +179,147 @@ def create_tf_example(group, path):
     return tf_example
 
 
+def augment_selector(classes_text, width, height):
+    """
+    crop = A.Compose([
+        A.RandomCrop(width=450, height=450),
+        A.RandomBrightnessContrast(p=0.2),
+        A.VerticalFlip(p=0.5),
+        A.VerticalFlip(p=0.5),
+        
+        ],
+        bbox_params={"format": 'pascal_voc',
+                     'label_fields': classes_text})
+    h_flip = A.Compose([
+        A.HorizontalFlip(p=0.5),
+        A.RandomBrightnessContrast(p=0.2)],
+        bbox_params={"format": 'pascal_voc',
+                     'label_fields': classes_text})
+    v_flip = A.Compose([
+        
+        A.RandomBrightnessContrast(p=0.2)],
+        bbox_params={"format": 'pascal_voc',
+                     'label_fields': classes_text})
+    brightness = A.Compose([
+        A.RandomBrightnessContrast(p=0.2)],
+        bbox_params={"format": 'pascal_voc',
+                     'label_fields': classes_text})
+    """
+    random_ratio = float(np.random.uniform(low=0.7, high=0.99))
+    transform = A.Compose([
+            A.RandomCrop(width=int(width*random_ratio),
+                         height=int(height*random_ratio)),
+            A.HorizontalFlip(p=0.3),
+            A.RandomBrightnessContrast(p=0.2),
+            A.VerticalFlip(p=0.3),
+            A.GaussNoise(p=0.2),
+            A.GaussianBlur(p=0.2),
+            A.CLAHE(p=0.2),
+            A.HueSaturationValue(p=0.2),  
+            A.RandomSunFlare(p=0.2),
+            A.RandomRain(p=0.2),
+            A.RandomFog(p=0.2),],
+        bbox_params=A.BboxParams(format='pascal_voc',
+                                 label_fields=['classes_text']))
+    
+    #augment_dict = {
+    #    "crop": crop,
+    #    "h_flip": h_flip,
+    #    "v_flip": v_flip,
+    #    "brightness": brightness,
+    #}
+
+    return transform#augment_dict.get(augment_type)
+
+
+def augment_pipeline(image, width, height, bboxes, classes_text,
+                     group, path, filename, image_format,
+                     augment_type="crop"):
+
+    classes_text = [classes.decode("utf-8") for classes in classes_text]
+
+    transform = augment_selector(classes_text,
+                                 width, height)
+
+    transformed = transform(image=np.asarray(image),
+                            bboxes=bboxes,
+                            classes_text=classes_text)
+    #print(transformed)
+    transformed_img = transformed["image"]
+    plt.imshow(transformed_img/255)
+    transformed_encoded_jpg = tf.io.serialize_tensor(transformed_img).numpy()
+    bboxes = np.array(transformed["bboxes"])
+    #print(transformed["bboxes"])
+    if len(bboxes):
+        transformed_xmins = [float(xmin) for xmin in bboxes[:, 0]]
+        transformed_ymins = [float(ymin) for ymin in bboxes[:, 1]]
+        transformed_xmaxs = [float(xmax) for xmax in bboxes[:, 2]]
+        transformed_ymaxs = [float(ymax) for ymax in bboxes[:, 3]]
+        transformed_classes = [class_text_to_int(t_class) for t_class in transformed["classes_text"]]
+        transformed_classes_text = [t_class.encode('utf-8') for t_class in transformed["classes_text"]]
+    else:
+        transformed_xmins = list()
+        transformed_ymins = list()
+        transformed_xmaxs = list()
+        transformed_ymaxs = list()
+        transformed_classes_text = list()
+        transformed_classes = list()
+    #transformed_xmins, transformed_ymins, transformed_xmaxs, transformed_ymaxs = transformed["bboxs"]
+    #print(transformed["bboxs"])
+
+    transformed_width, transformed_height = Image.fromarray(transformed_img).size
+
+    return_dict = {
+        "encoded_jpg": transformed_encoded_jpg,
+        "image": transformed_img,
+        "width": transformed_width,
+        "height": transformed_height, 
+        "xmins": transformed_xmins, 
+        "xmaxs": transformed_xmaxs,
+        "ymins": transformed_ymins, 
+        "ymaxs": transformed_ymaxs, 
+        "classes_text": transformed_classes_text, 
+        "classes": transformed_classes, 
+        "filename": filename,
+        "image_format": image_format,
+    }
+    
+    return return_dict #transformed_encoded_jpg, transformed_img, transformed_width, transformed_height, \
+           #     transformed_xmins, transformed_xmaxs, transformed_ymins, transformed_ymaxs, \
+           #        transformed_classes_text,  transformed_classes, filename, image_format
+
+
 def main(_):
 
-    writer = tf.python_io.TFRecordWriter(args.output_path)
+    writer = tf.io.TFRecordWriter(args.output_path)
     path = os.path.join(args.image_dir)
     examples = xml_to_csv(args.xml_dir)
     grouped = split(examples, 'filename')
+    #print(len(grouped))
     for group in grouped:
-        tf_example = create_tf_example(group, path)
+        encoded_jpg, encoded_jpg_io, image, width, height = read_img(group, path)
+        xmins, xmaxs, ymins, ymaxs, classes_text, classes = structure_example(width, height, group, path)
+        bboxs = list(zip(xmins, ymins, xmaxs, ymaxs, [class_text.decode("utf-8") for class_text in classes_text]))
+        filename = group.filename.encode('utf8')
+        image_format = bytes(args.img_extension, "utf-8")
+        tf_example = create_tf_example(encoded_jpg, image, width, height,xmins, xmaxs,
+                                       ymins, ymaxs, classes_text, classes, filename,
+                                       image_format)
         writer.write(tf_example.SerializeToString())
+        if args.augment:
+            for augment_type in ["crop", "h_flip", "v_flip", "brightness"]:
+                #print(augment_pipeline(image, width, height, bboxs, classes_text, 
+                #                       group, path, filename, image_format,
+                #                       augment_type=augment_type))
+                tf_example = create_tf_example(**augment_pipeline(image, width,
+                                                                  height, bboxs,
+                                                                  classes_text, 
+                                                                  group, path, 
+                                                                  filename, 
+                                                                  image_format,
+                                                                  augment_type=augment_type))
+                writer.write(tf_example.SerializeToString())
+            
     writer.close()
     print('Successfully created the TFRecord file: {}'.format(args.output_path))
     if args.csv_path is not None:
@@ -176,4 +328,4 @@ def main(_):
 
 
 if __name__ == '__main__':
-    tf.app.run()
+    tf_compat.app.run()
