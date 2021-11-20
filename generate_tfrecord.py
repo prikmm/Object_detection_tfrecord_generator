@@ -61,10 +61,14 @@ parser.add_argument("-e",
                     "--img_extension",
                     help="Extension of the images. jpg or jpeg",
                     type=str, default="jpeg")
-parser.add_argument("-a",
-                    "--augment",
+parser.add_argument("--augment",
                     help="Whether to augment the dataset or not",
-                    type=bool, default=True)
+                    dest="augment",
+                    action="store_true")
+parser.add_argument("--no-augment",
+                    dest="augment",
+                    action="store_false")
+parser.set_defaults(augment=False)
 
 
 args = parser.parse_args()
@@ -295,6 +299,10 @@ def main(_):
     path = os.path.join(args.image_dir)
     examples = xml_to_csv(args.xml_dir)
     grouped = split(examples, 'filename')
+    if args.augment:
+        print("Data Augmentation will be performed.")
+    else:
+        print("Data Augmentation will not be performed.")
     #print(len(grouped))
     for group in grouped:
         encoded_jpg, encoded_jpg_io, image, width, height = read_img(group, path)
