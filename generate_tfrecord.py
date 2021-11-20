@@ -138,6 +138,8 @@ def read_img(group, path):
     encoded_jpg_io = io.BytesIO(encoded_jpg)
     image = Image.open(encoded_jpg_io)
     width, height = image.size
+    #print("ORIGINAL IMAGE: ", np.asarray(image))
+    #print(encoded_jpg)
     return encoded_jpg, encoded_jpg_io, image, width, height
 
 
@@ -211,8 +213,9 @@ def augment_selector(classes_text, width, height):
     """
     random_ratio = float(np.random.uniform(low=0.7, high=0.99))
     transform = A.Compose([
-            A.RandomCrop(width=int(width*random_ratio),
-                         height=int(height*random_ratio)),
+            #A.RandomSizedBBoxSafeCrop(width=int(width*random_ratio),
+            #                          height=int(height*random_ratio),
+            #                          erosion_rate=0.2),
             A.HorizontalFlip(p=0.3),
             A.RandomBrightnessContrast(p=0.2),
             A.VerticalFlip(p=0.3),
@@ -250,8 +253,13 @@ def augment_pipeline(image, width, height, bboxes, classes_text,
                             classes_text=classes_text)
     #print(transformed)
     transformed_img = transformed["image"]
-    plt.imshow(transformed_img/255)
-    transformed_encoded_jpg = tf.io.serialize_tensor(transformed_img).numpy()
+    transformed_img = Image.fromarray(transformed_img)
+    buf = io.BytesIO()
+    transformed_img.save(buf, format='JPEG')#image_format.decode("utf-8"))
+    transformed_encoded_jpg = buf.getvalue()
+    #print(type(transformed_img))
+    #print(transformed_img.shape)
+    #transformed_encoded_jpg = transformed_img["image"].tobytes()#tf.io.serialize_tensor(transformed_img).numpy()
     bboxes = np.array(transformed["bboxes"])
     #print(transformed["bboxes"])
     if len(bboxes):
@@ -271,7 +279,7 @@ def augment_pipeline(image, width, height, bboxes, classes_text,
     #transformed_xmins, transformed_ymins, transformed_xmaxs, transformed_ymaxs = transformed["bboxs"]
     #print(transformed["bboxs"])
 
-    transformed_width, transformed_height = Image.fromarray(transformed_img).size
+    transformed_width, transformed_height = transformed_img.size
 
     return_dict = {
         "encoded_jpg": transformed_encoded_jpg,
